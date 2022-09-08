@@ -26,7 +26,6 @@ from urllib.parse import quote as urlencode
 from html.entities import name2codepoint
 import logging
 import time
-import pdb                      # DEBUG
 
 # ----------------------------------------------------------------------
 
@@ -82,7 +81,6 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
     if expand_templates:
         # expand templates
         # See: http://www.mediawiki.org/wiki/Help:Templates
-        pdb.set_trace()         # DEBUG
         text = extractor.expandTemplates(text)
     else:
         # Drop transclusions (template, parser functions)
@@ -133,9 +131,11 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
         spans.append((m.start(), m.end()))
 
     # Drop self-closing tags
-    for pattern in selfClosing_tag_patterns:
-        for m in pattern.finditer(text):
-            spans.append((m.start(), m.end()))
+    for m in selfClosing_tag_pattern_all.finditer(text):
+        spans.append((m.start(), m.end()))
+    # for pattern in selfClosing_tag_patterns:
+    #     for m in pattern.finditer(text):
+    #         spans.append((m.start(), m.end()))
 
     # Drop ignored tags
     for left, right in ignored_tag_patterns:
@@ -163,6 +163,10 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
             index += 1
 
     text = text.replace('<<', u'«').replace('>>', u'»')
+
+    # Remove parentheses without any content, which often happens when template expansion fails
+    text = re.sub('[ ]*\([.,;!?\-\'" ]*\)', '', text)
+    text = re.sub('[ ]*\[[.,;!?\-\'" ]*\]', '', text)
 
     #############################################
 
@@ -198,8 +202,17 @@ def compact(text, mark_headers=False):
     emptySection = False  # empty sections are discarded
     listLevel = ''  # nesting of lists
 
+    def output_headers():
+        if Extractor.keepSections:
+            items = sorted(headers.items())
+            for (i, v) in items:
+                page.append('=' * i + ' ' + v.strip() + ' ' + '=' * i)
+        headers.clear()
+
+
     for line in text.split('\n'):
 
+        line = line.strip().lstrip(':')  # Remove indent
         if not line:
             if len(listLevel):    # implies Extractor.HtmlFormatting
                 for c in reversed(listLevel):
@@ -214,8 +227,8 @@ def compact(text, mark_headers=False):
             lev = len(m.group(1))
             if Extractor.HtmlFormatting:
                 page.append("<h%d>%s</h%d>" % (lev, title, lev))
-            if title and title[-1] not in '!?':
-                title += '.'
+            # if title and title[-1] not in '!?':
+            #     title += '.'
 
             if mark_headers:
                 title = "## " + title
@@ -261,7 +274,15 @@ def compact(text, mark_headers=False):
                     line = line[l:].strip()
                 page.append(listItem[type] % line)
             else:
-                continue
+                c = len(line.lstrip())
+                line = line.lstrip('*#;')
+                level = c - len(line) - 1
+                line = line.strip()
+                if not line:
+                    continue
+                output_headers()
+                page.append(' ' * 4 * level + '- ' + line)
+                emptySection = False
         elif len(listLevel):    # implies Extractor.HtmlFormatting
             for c in reversed(listLevel):
                 page.append(listClose[c])
@@ -274,11 +295,7 @@ def compact(text, mark_headers=False):
         elif (line[0] == '(' and line[-1] == ')') or line.strip('.-') == '':
             continue
         elif len(headers):
-            if Extractor.keepSections:
-                items = sorted(headers.items())
-                for (i, v) in items:
-                    page.append(v)
-            headers.clear()
+            output_headers()
             page.append(line)  # first line
             emptySection = False
         elif not emptySection:
@@ -455,35 +472,37 @@ def replaceInternalLinks(text):
     """
     # call this after removal of external links, so we need not worry about
     # triple closing ]]].
-    cur = 0
-    res = ''
-    for s, e in findBalanced(text, ['[['], [']]']):
-        m = tailRE.match(text, e)
-        if m:
-            trail = m.group(0)
-            end = m.end()
-        else:
-            trail = ''
-            end = e
-        inner = text[s + 2:e - 2]
-        # find first |
-        pipe = inner.find('|')
-        if pipe < 0:
-            title = inner
-            label = title
-        else:
-            title = inner[:pipe].rstrip()
-            # find last |
-            curp = pipe + 1
-            for s1, e1 in findBalanced(inner, ['[['], [']]']):
-                last = inner.rfind('|', curp, s1)
-                if last >= 0:
-                    pipe = last  # advance
-                curp = e1
-            label = inner[pipe + 1:].strip()
-        res += text[cur:s] + makeInternalLink(title, label) + trail
-        cur = end
-    return res + text[cur:]
+    res = []
+    for line in text.split('\n'):
+        cur = 0
+        for s, e in findBalanced(line, ['[['], [']]']):
+            m = tailRE.match(line, e)
+            if m:
+                trail = m.group(0)
+                end = m.end()
+            else:
+                trail = ''
+                end = e
+            inner = line[s + 2:e - 2]
+            # find first |
+            pipe = inner.find('|')
+            if pipe < 0:
+                title = inner
+                label = title
+            else:
+                title = inner[:pipe].rstrip()
+                # find last |
+                curp = pipe + 1
+                for s1, e1 in findBalanced(inner, ['[['], [']]']):
+                    last = inner.rfind('|', curp, s1)
+                    if last >= 0:
+                        pipe = last  # advance
+                    curp = e1
+                label = inner[pipe + 1:].strip()
+            res += [line[cur:s], makeInternalLink(title, label), trail]
+            cur = end
+        res += [line[cur:], '\n']
+    return ''.join(res)
 
 
 def makeInternalLink(title, label):
@@ -765,6 +784,7 @@ for tag in ignoredTags:
 selfClosing_tag_patterns = [
     re.compile(r'<\s*%s\b[^>]*/\s*>' % tag, re.DOTALL | re.IGNORECASE) for tag in selfClosingTags
 ]
+selfClosing_tag_pattern_all = re.compile(r'<\s*[a-z]+\b[^>]*/\s*>', re.DOTALL | re.IGNORECASE)
 
 # Match HTML placeholder tags
 placeholder_tag_patterns = [
@@ -831,6 +851,9 @@ class Template(list):
         # "{{{{{{{{{p}}}}}}}}}", {{tvvv|p=q|q=r|r=s}} gives s.
 
         #logging.debug('subst tpl (%d, %d) %s', len(extractor.frame), depth, self)
+
+        if extractor.total_errs >= extractor.maxTotalErrors:
+            return ''
 
         if depth > extractor.maxParameterRecursionLevels:
             extractor.recursion_exceeded_3_errs += 1
@@ -945,6 +968,10 @@ class Extractor():
         self.recursion_exceeded_3_errs = 0  # parameter recursion
         self.template_title_errs = 0
 
+    @property
+    def total_errs(self):
+        return self.recursion_exceeded_1_errs + self.recursion_exceeded_2_errs + self.recursion_exceeded_3_errs
+
     def clean_text(self, text, mark_headers=False, expand_templates=True,
                    html_safe=True):
         """
@@ -1009,6 +1036,7 @@ class Extractor():
 
     maxTemplateRecursionLevels = 30
     maxParameterRecursionLevels = 10
+    maxTotalErrors = 100
 
     # check for template beginning
     reOpen = re.compile('(?<!{){{(?!{)', re.DOTALL)
@@ -1036,6 +1064,8 @@ class Extractor():
         # https://en.wikipedia.org/wiki/Special:ExpandTemplates
 
         res = ''
+        if self.total_errs >= self.maxTotalErrors:
+            return res
         if len(self.frame) >= self.maxTemplateRecursionLevels:
             self.recursion_exceeded_1_errs += 1
             return res
@@ -1045,7 +1075,7 @@ class Extractor():
         cur = 0
         # look for matching {{...}}
         for s, e in findMatchingBraces(wikitext, 2):
-            res += wikitext[cur:s] + self.expandTemplate(wikitext[s + 2:e - 2])
+            res += wikitext[cur:s] + self.expandTemplate(wikitext[s + 2:e - 2]).strip()
             cur = e
         # leftover
         res += wikitext[cur:]
@@ -1169,6 +1199,8 @@ class Extractor():
         # part are not taken into account in this decomposition. Parts without
         # equals sign are indexed 1, 2, .., given as attribute in the <name> tag.
 
+        if self.total_errs >= self.maxTotalErrors:
+            return ''
         if len(self.frame) >= self.maxTemplateRecursionLevels:
             self.recursion_exceeded_2_errs += 1
             # logging.debug('   INVOCATION> %d %s', len(self.frame), body)
@@ -1764,6 +1796,8 @@ parserFunctions = {
 
     'int': lambda string, *rest: str(int(string)),
 
+    'formatnum': lambda extr, string, *rest: string,
+
 }
 
 
@@ -1817,7 +1851,8 @@ def define_template(title, page):
     # title = normalizeTitle(title)
 
     # check for redirects
-    m = re.match('#REDIRECT.*?\[\[([^\]]*)]]', page[0], re.IGNORECASE)
+    m = re.match('#[A-Z]+.*?\[\[([^\]]*)]]', page[0], re.IGNORECASE)  # Non-English languages use other keywords
+    # m = re.match('#REDIRECT.*?\[\[([^\]]*)]]', page[0], re.IGNORECASE)
     if m:
         redirects[title] = m.group(1)  # normalizeTitle(m.group(1))
         return
